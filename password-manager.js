@@ -22,17 +22,20 @@ class Keychain {
    * Return Type: void
    */
 
-  constructor(_version, _masterKey, _masterSalt) {
+  constructor(masterKey, hmacKey, masterSalt, iv, kvs, version) {
     this.data = {
-      version: _version
       /* Store member variables that you intend to be public here
          (i.e. information that will not compromise security if an adversary sees) */
+      masterSalt: masterSalt,
+      iv: iv,
+      version: version,
+      kvs: kvs
     };
     this.secrets = {
-      masterKey: _masterKey,
-      masterSalt: _masterSalt
       /* Store member variables that you intend to be private here
          (information that an adversary should NOT see). */
+      masterKey: masterKey,
+      hmacKey: hmacKey
     };
 
     // throw "Not Implemented!";
@@ -48,19 +51,43 @@ class Keychain {
   static async init(password) {
     let version = "CS 255 Password Manager v1.0";
 
+    let kvs = {};
+    
     let passwordBuffer = stringToBuffer(password);
-    let masterSalt = randomBytes(128);
-    let masterKey = await subtle.importKey("raw", passwordBuffer, "PBKDF2", false, ["deriveKey"]);
 
-    return new this(version, masterKey, masterSalt);
+    let masterSalt = randomBytes(16);
+    let masterSaltB64 = encodeBuffer(masterSalt);
 
-    // let derivedKey = await subtle.deriveKey(
-    //   { name: "PBKDF2", salt: masterSalt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" }, 
-    //   masterKey, 
-    //   { name: "AES-GCM", length: 256 },
-    //   false,
-    //   ["encrypt", "decrypt"]
-    // );
+    let iv = randomBytes(16);
+    let ivB64 = encodeBuffer(iv);
+    
+    let pbkdf2Key = await subtle.importKey("raw", passwordBuffer, "PBKDF2", false, ["deriveKey"]);
+
+    // Key for encrypting password
+    let masterKey = await subtle.deriveKey(
+      { name: "PBKDF2", salt: masterSalt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+      pbkdf2Key,
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    let exportedMasterKey = await subtle.exportKey("raw", masterKey);
+    let exportedMasterKeyB64 = encodeBuffer(exportedMasterKey);
+
+    // Key for verifying domain
+    let HMACKey = await subtle.deriveKey(
+      { name: "PBKDF2", salt: masterSalt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+      pbkdf2Key,
+      { name: "HMAC", hash: {name: "SHA-256"}, length: 256 },
+      true,
+      ["sign", "verify"]
+    );
+    let exportedHMACKey = await subtle.exportKey("raw", HMACKey);
+    let exportedHMACKeyB64 = encodeBuffer(exportedHMACKey);
+
+    let keychain = new Keychain(exportedMasterKeyB64, exportedHMACKeyB64, masterSaltB64, ivB64, kvs, version);
+
+    return keychain;
     // throw "Not Implemented!";
   }
 
@@ -146,21 +173,47 @@ class Keychain {
   };
 };
 
-// module.exports = { Keychain }
+module.exports = { Keychain }
 
 // These code is for testing
 async function test(password){
+  // initialize keychain
   let keychain = await Keychain.init(password);
   let data = await keychain.dump();
+  console.log(data);
   
-  console.log(data[1])
-  let checksum = await subtle.digest("SHA-256", stringToBuffer(data[0]));
+  // test for encryption & decryption
+  let pwd = "testaaaaaaa";
+  let keychain_restored = JSON.parse(data[0]);
   
-  if(encodeBuffer(checksum) === data[1]){
-    console.log("MATCH")
-  }else{
-    console.log("UNMATCH")
-  }
+  let exportedMasterKeyB64 = keychain_restored.secrets.masterKey;
+  let exportedMasterKey = decodeBuffer(exportedMasterKeyB64);
+
+  let ivB64 = keychain_restored.data.iv;
+  let iv = decodeBuffer(ivB64);
+
+  let masterKey = await subtle.importKey(
+    "raw",
+    exportedMasterKey,
+    {name: "AES-GCM", hash: {name: "SHA-256"}},
+    true,
+    ["encrypt", "decrypt"]
+  );
+
+  let encryptedPwd = await subtle.encrypt(
+    { name: "AES-GCM", iv },
+    masterKey, 
+    stringToBuffer(pwd)
+  );
+  console.log(encodeBuffer(encryptedPwd));
+
+  let decryptedPwd = await subtle.decrypt(
+    { name: "AES-GCM", iv },
+    masterKey,
+    encryptedPwd
+  )
+
+  console.log(bufferToString(decryptedPwd))
   // subtle.verify("SHA-256", )
 }
 let password = "This is the password";

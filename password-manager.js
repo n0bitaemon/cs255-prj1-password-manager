@@ -22,11 +22,12 @@ class Keychain {
    * Return Type: void
    */
 
-  constructor(masterKey, hmacKey, masterSalt, iv, kvs, version) {
+  constructor(masterKey, hmacKey, masterSalt, hmacSalt, iv, kvs, version) {
     this.data = {
       /* Store member variables that you intend to be public here
          (i.e. information that will not compromise security if an adversary sees) */
       masterSalt: masterSalt,
+      hmacSalt: hmacSalt,
       iv: iv,
       version: version,
       kvs: kvs
@@ -57,6 +58,8 @@ class Keychain {
 
     let masterSalt = randomBytes(16);
     let masterSaltB64 = encodeBuffer(masterSalt);
+    let hmacSalt = randomBytes(16);
+    let hmacSaltB64 = encodeBuffer(hmacSalt);
 
     let iv = randomBytes(16);
     let ivB64 = encodeBuffer(iv);
@@ -85,7 +88,7 @@ class Keychain {
     let exportedHMACKey = await subtle.exportKey("raw", HMACKey);
     let exportedHMACKeyB64 = encodeBuffer(exportedHMACKey);
 
-    let keychain = new Keychain(exportedMasterKeyB64, exportedHMACKeyB64, masterSaltB64, ivB64, kvs, version);
+    let keychain = new Keychain(exportedMasterKeyB64, exportedHMACKeyB64, masterSaltB64, hmacSaltB64, ivB64, kvs, version);
 
     return keychain;
     // throw "Not Implemented!";
@@ -192,6 +195,7 @@ async function test(password){
   let ivB64 = keychain_restored.data.iv;
   let iv = decodeBuffer(ivB64);
 
+  // encrypt pwd
   let masterKey = await subtle.importKey(
     "raw",
     exportedMasterKey,
@@ -200,6 +204,7 @@ async function test(password){
     ["encrypt", "decrypt"]
   );
 
+  // decrypt pwd
   let encryptedPwd = await subtle.encrypt(
     { name: "AES-GCM", iv },
     masterKey, 

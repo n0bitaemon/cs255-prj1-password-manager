@@ -4,12 +4,22 @@ const { randomBytes } = require("crypto");
 /********* External Imports ********/
 
 const { stringToBuffer, bufferToString, encodeBuffer, decodeBuffer, getRandomBytes } = require("./lib");
+const { encode } = require("punycode");
 const { subtle } = require('crypto').webcrypto;
 
 /********* Constants ********/
 
 const PBKDF2_ITERATIONS = 100000; // number of iterations for PBKDF2 algorithm
 const MAX_PASSWORD_LENGTH = 64;   // we can assume no password is longer than this many characters
+
+function toArrayBuffer(buffer) {
+  const arrayBuffer = new ArrayBuffer(buffer.length);
+  const view = new Uint8Array(arrayBuffer);
+  for (let i = 0; i < buffer.length; ++i) {
+    view[i] = buffer[i];
+  }
+  return arrayBuffer;
+}
 
 /********* Implementation ********/
 class Keychain {
@@ -29,7 +39,6 @@ class Keychain {
       /* Store member variables that you intend to be public here
          (i.e. information that will not compromise security if an adversary sees) */
     };
-    console.log(HMACKey);
     this.secrets = {
       /* Store member variables that you intend to be private here
          (information that an adversary should NOT see). */
@@ -87,7 +96,6 @@ class Keychain {
       true,
       ["encrypt", "decrypt"]
     );
-    let exportedAESGCMKey = await subtle.exportKey("raw", AESGCMKey);
 
     // HMAC key for domain name
     let HMACSalt = getRandomBytes(16);
@@ -103,7 +111,6 @@ class Keychain {
       true,
       ["sign"]
     );
-    let exportedHMACKey = await subtle.exportKey("raw", HMACKey);
 
     let keychain = new Keychain({}, masterSalt, HMACSalt, HMACKey_sig, HMACKey, AESGCMSalt, AESGCMKey_sig, AESGCMKey);
 
@@ -148,10 +155,22 @@ class Keychain {
     if(this.ready === false) throw "Keychain not initialized.";
 
     let contents = this.secrets;
-    contents["HMACKey"] = encodeBuffer(await subtle.exportKey("raw", contents["HMACKey"]));
+
+    contents["masterSalt"] = encodeBuffer(bufferToString(contents["masterSalt"]));
+
+    contents["HMACSalt"] = encodeBuffer(bufferToString(contents["HMACSalt"]));
     contents["HMACKey_sig"] = encodeBuffer(contents["HMACKey_sig"]);
-    contents["AESGCMKey"] = encodeBuffer(await subtle.exportKey("raw", contents["AESGCMKey"]));
+    contents["HMACKey"] = encodeBuffer(await subtle.exportKey("raw", contents["HMACKey"]));
+
+    contents["AESGCMSalt"] = encodeBuffer(bufferToString(contents["AESGCMSalt"]));
     contents["AESGCMKey_sig"] = encodeBuffer(contents["AESGCMKey_sig"]);
+    contents["AESGCMKey"] = encodeBuffer(await subtle.exportKey("raw", contents["AESGCMKey"]));
+    
+    for(const [key, value] of Object.entries(contents["kvs"])){
+      contents["kvs"][key]["iv"] = encodeBuffer(contents["kvs"][key]["iv"]);
+      contents["kvs"][key]["pwd"] = encodeBuffer(contents["kvs"][key]["pwd"]);
+      contents["kvs"][key]["tag"] = encodeBuffer(contents["kvs"][key]["tag"]);
+    }
 
     let encodedStore = JSON.stringify(contents);
     let checksum = await subtle.digest("SHA-256", stringToBuffer(encodedStore));
@@ -171,7 +190,51 @@ class Keychain {
     * Return Type: Promise<string>
     */
   async get(name) {
-    throw "Not Implemented!";
+    if(this.ready === false) throw "Keychain is not initialized.";
+    
+    let key = await subtle.sign(
+      "HMAC",
+      this.secrets.HMACKey,
+      stringToBuffer(name)
+    );
+
+    let HMACKeyForTag = await subtle.importKey(
+      "raw",
+      key,
+      {name: "HMAC", hash: "SHA-256"},
+      false,
+      ["verify"]
+    );
+
+    let plaintext = null;
+    key = encodeBuffer(key);
+    if(this.secrets.kvs.hasOwnProperty(key)){
+      let value = this.secrets.kvs[key];
+      let iv = value.iv;
+      let encryptedPwd = value.pwd;
+      let tag = value.tag;
+
+      let verification = await subtle.verify(
+        "HMAC",
+        HMACKeyForTag,
+        tag,
+        encryptedPwd
+      );
+      
+      if(verification === false) throw "Tampering is detected!";
+
+      plaintext = await subtle.decrypt(
+        {name: "AES-GCM", iv: iv},
+        this.secrets.AESGCMKey,
+        encryptedPwd
+      );
+
+      plaintext = bufferToString(plaintext);
+    }
+
+    return plaintext;
+
+    // throw "Not Implemented!";
   };
 
   /** 
@@ -185,12 +248,38 @@ class Keychain {
   * Return Type: void
   */
   async set(name, value) {
-    // if(this.ready === false) throw "Keychain not initialized.";
+    if(this.ready === false) throw "Keychain not initialized.";
 
-    // let key = await subtle.sign(
-    //   "HMAC",
-    //   this.secrets.HMACKey
-    // )
+    // compute key for domain name
+    let key = await subtle.sign(
+      "HMAC",
+      this.secrets.HMACKey,
+      stringToBuffer(name)
+    );
+
+    let HMACKeyForTag = await subtle.importKey(
+      "raw",
+      key,
+      {name: "HMAC", hash: "SHA-256"},
+      false,
+      ["sign"]
+    );
+    
+    // encrypt the value
+    let iv = randomBytes(16);
+    let encryptedPwd = await subtle.encrypt(
+      {name: "AES-GCM", iv: iv},
+      this.secrets.AESGCMKey,
+      stringToBuffer(value)
+    )
+
+    let tag = await subtle.sign(
+      "HMAC",
+      HMACKeyForTag,
+      encryptedPwd
+    );
+
+    this.secrets.kvs[encodeBuffer(key)] = {iv: iv, pwd: encryptedPwd, tag: tag};
 
     // throw "Not Implemented!";
   };
@@ -204,7 +293,23 @@ class Keychain {
     * Return Type: Promise<boolean>
   */
   async remove(name) {
-    throw "Not Implemented!";
+    if(this.ready === false) throw "Keychain not initialized.";
+
+    let key = await subtle.sign(
+      "HMAC",
+      this.secrets.HMACKey,
+      stringToBuffer(name)
+    );
+    key = encodeBuffer(key);
+
+    // Remove the entry from KVS
+    if(this.secrets.kvs.hasOwnProperty(key)){
+      delete this.secrets.kvs[key];
+      return true;
+    }
+
+    return false;
+    // throw "Not Implemented!";
   };
 };
 
@@ -214,9 +319,24 @@ module.exports = { Keychain }
 async function test(password) {
   // initialize keychain
   let keychain = await Keychain.init(password);
-  let data = await keychain.dump();
-  console.log(data);
+  await keychain.set("www.google.com", "trietsuper");
+  await keychain.set("www.facebook.com", "trietdeptraiahaha");
+  await keychain.set("www.example.com", "talasieunhan");
+
+  console.log(keychain.secrets);
+
+  console.log(await keychain.get("www.example.com"));
+  console.log(await keychain.get("www.facebook.com"));
+
+  await keychain.remove("www.facebook.com");
+
+  console.log(await keychain.get("www.facebook.com"));
+  console.log(await keychain.get("www.google.com"))
 }
 let password = "This is the password";
-test(password);
 
+try{
+  test(password);
+} catch(e){
+  console.log(e);
+}

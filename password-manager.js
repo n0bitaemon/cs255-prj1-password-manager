@@ -105,7 +105,7 @@ class Keychain {
     );
     let exportedHMACKey = await subtle.exportKey("raw", HMACKey);
 
-    let keychain = new Keychain({}, masterSalt, HMACSalt, encodeBuffer(HMACKey_sig), encodeBuffer(exportedHMACKey), AESGCMSalt, encodeBuffer(AESGCMKey_sig), encodeBuffer(exportedAESGCMKey));
+    let keychain = new Keychain({}, masterSalt, HMACSalt, HMACKey_sig, HMACKey, AESGCMSalt, AESGCMKey_sig, AESGCMKey);
 
     return keychain;
     // throw "Not Implemented!";
@@ -145,9 +145,15 @@ class Keychain {
     * Return Type: array
     */
   async dump() {
-    if(this.ready === false) return null;
-    
-    let encodedStore = JSON.stringify(this.secrets);
+    if(this.ready === false) throw "Keychain not initialized.";
+
+    let contents = this.secrets;
+    contents["HMACKey"] = encodeBuffer(await subtle.exportKey("raw", contents["HMACKey"]));
+    contents["HMACKey_sig"] = encodeBuffer(contents["HMACKey_sig"]);
+    contents["AESGCMKey"] = encodeBuffer(await subtle.exportKey("raw", contents["AESGCMKey"]));
+    contents["AESGCMKey_sig"] = encodeBuffer(contents["AESGCMKey_sig"]);
+
+    let encodedStore = JSON.stringify(contents);
     let checksum = await subtle.digest("SHA-256", stringToBuffer(encodedStore));
     checksum = encodeBuffer(checksum);
 
@@ -179,7 +185,14 @@ class Keychain {
   * Return Type: void
   */
   async set(name, value) {
-    throw "Not Implemented!";
+    // if(this.ready === false) throw "Keychain not initialized.";
+
+    // let key = await subtle.sign(
+    //   "HMAC",
+    //   this.secrets.HMACKey
+    // )
+
+    // throw "Not Implemented!";
   };
 
   /**
@@ -203,17 +216,6 @@ async function test(password) {
   let keychain = await Keychain.init(password);
   let data = await keychain.dump();
   console.log(data);
-  // let recovered = JSON.parse(data[0]);
-  // console.log(recovered)
-
-  // let recoveredAESGCM = await subtle.importKey(
-  //   "raw",
-  //   recovered.AESGCMKey,
-  //   {name: "AES-GCM", hash: {name: "SHA-256"}},
-  //   false,
-  //   ["encrypt", "decrypt"]
-  // )
-  // console.log(recoveredAESGCM)
 }
 let password = "This is the password";
 test(password);

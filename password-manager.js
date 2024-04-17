@@ -13,6 +13,8 @@ const MAX_PASSWORD_LENGTH = 64;   // we can assume no password is longer than th
 
 /********* Implementation ********/
 class Keychain {
+
+  ready = false;
   /**
    * Initializes the keychain using the provided information. Note that external
    * users should likely never invoke the constructor directly and instead use
@@ -22,22 +24,26 @@ class Keychain {
    * Return Type: void
    */
 
-  constructor(masterKey, hmacKey, masterSalt, hmacSalt, iv, kvs, version) {
+  constructor(kvs, masterSalt, HMACSalt, HMACKey_sig, HMACKey, AESGCMSalt, AESGCMKey_sig, AESGCMKey) {
     this.data = {
       /* Store member variables that you intend to be public here
          (i.e. information that will not compromise security if an adversary sees) */
-      masterSalt: masterSalt,
-      hmacSalt: hmacSalt,
-      iv: iv,
-      version: version,
-      kvs: kvs
     };
+    console.log(HMACKey);
     this.secrets = {
       /* Store member variables that you intend to be private here
          (information that an adversary should NOT see). */
-      masterKey: masterKey,
-      hmacKey: hmacKey
+      kvs: kvs,
+      masterSalt: masterSalt,
+      HMACSalt: HMACSalt,
+      HMACKey_sig: HMACKey_sig,
+      HMACKey: HMACKey,
+      AESGCMSalt: AESGCMSalt,
+      AESGCMKey_sig: AESGCMKey_sig,
+      AESGCMKey: AESGCMKey
     };
+
+    this.ready = true;
 
     // throw "Not Implemented!";
   };
@@ -50,45 +56,56 @@ class Keychain {
     * Return Type: void
     */
   static async init(password) {
-    let version = "CS 255 Password Manager v1.0";
-
-    let kvs = {};
-    
     let passwordBuffer = stringToBuffer(password);
 
+    // let iv = randomBytes(16);
+    // let ivB64 = encodeBuffer(iv);
+
+    let rawKey = await subtle.importKey("raw", passwordBuffer, "PBKDF2", false, ["deriveKey"]);
+
+    // Master key for load()
     let masterSalt = randomBytes(16);
-    let masterSaltB64 = encodeBuffer(masterSalt);
-    let hmacSalt = randomBytes(16);
-    let hmacSaltB64 = encodeBuffer(hmacSalt);
-
-    let iv = randomBytes(16);
-    let ivB64 = encodeBuffer(iv);
-    
-    let pbkdf2Key = await subtle.importKey("raw", passwordBuffer, "PBKDF2", false, ["deriveKey"]);
-
-    // Key for encrypting password
     let masterKey = await subtle.deriveKey(
       { name: "PBKDF2", salt: masterSalt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
-      pbkdf2Key,
+      rawKey,
+      { name: "HMAC", hash: "SHA-256", length: 256 },
+      false,
+      ["sign", "verify"]
+    );
+
+    // AES-GCM key for password
+    let AESGCMSalt = randomBytes(16);
+    let AESGCMKey_sig = await subtle.sign(
+      "HMAC",
+      masterKey,
+      AESGCMSalt
+    )
+    let AESGCMKey = await subtle.importKey(
+      "raw",
+      AESGCMKey_sig,
       { name: "AES-GCM", length: 256 },
       true,
       ["encrypt", "decrypt"]
     );
-    let exportedMasterKey = await subtle.exportKey("raw", masterKey);
-    let exportedMasterKeyB64 = encodeBuffer(exportedMasterKey);
+    let exportedAESGCMKey = await subtle.exportKey("raw", AESGCMKey);
 
-    // Key for verifying domain
-    let HMACKey = await subtle.deriveKey(
-      { name: "PBKDF2", salt: masterSalt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
-      pbkdf2Key,
-      { name: "HMAC", hash: {name: "SHA-256"}, length: 256 },
+    // HMAC key for domain name
+    let HMACSalt = getRandomBytes(16);
+    let HMACKey_sig = await subtle.sign(
+      "HMAC",
+      masterKey,
+      HMACSalt
+    )
+    let HMACKey = await subtle.importKey(
+      "raw",
+      HMACKey_sig,
+      { name: "HMAC", hash: { name: "SHA-256" }, length: 256 },
       true,
-      ["sign", "verify"]
+      ["sign"]
     );
     let exportedHMACKey = await subtle.exportKey("raw", HMACKey);
-    let exportedHMACKeyB64 = encodeBuffer(exportedHMACKey);
 
-    let keychain = new Keychain(exportedMasterKeyB64, exportedHMACKeyB64, masterSaltB64, hmacSaltB64, ivB64, kvs, version);
+    let keychain = new Keychain({}, masterSalt, HMACSalt, encodeBuffer(HMACKey_sig), encodeBuffer(exportedHMACKey), AESGCMSalt, encodeBuffer(AESGCMKey_sig), encodeBuffer(exportedAESGCMKey));
 
     return keychain;
     // throw "Not Implemented!";
@@ -128,7 +145,9 @@ class Keychain {
     * Return Type: array
     */
   async dump() {
-    let encodedStore = JSON.stringify(this);
+    if(this.ready === false) return null;
+    
+    let encodedStore = JSON.stringify(this.secrets);
     let checksum = await subtle.digest("SHA-256", stringToBuffer(encodedStore));
     checksum = encodeBuffer(checksum);
 
@@ -179,47 +198,22 @@ class Keychain {
 module.exports = { Keychain }
 
 // These code is for testing
-async function test(password){
+async function test(password) {
   // initialize keychain
   let keychain = await Keychain.init(password);
   let data = await keychain.dump();
   console.log(data);
-  
-  // test for encryption & decryption
-  let pwd = "testaaaaaaa";
-  let keychain_restored = JSON.parse(data[0]);
-  
-  let exportedMasterKeyB64 = keychain_restored.secrets.masterKey;
-  let exportedMasterKey = decodeBuffer(exportedMasterKeyB64);
+  // let recovered = JSON.parse(data[0]);
+  // console.log(recovered)
 
-  let ivB64 = keychain_restored.data.iv;
-  let iv = decodeBuffer(ivB64);
-
-  // encrypt pwd
-  let masterKey = await subtle.importKey(
-    "raw",
-    exportedMasterKey,
-    {name: "AES-GCM", hash: {name: "SHA-256"}},
-    true,
-    ["encrypt", "decrypt"]
-  );
-
-  // decrypt pwd
-  let encryptedPwd = await subtle.encrypt(
-    { name: "AES-GCM", iv },
-    masterKey, 
-    stringToBuffer(pwd)
-  );
-  console.log(encodeBuffer(encryptedPwd));
-
-  let decryptedPwd = await subtle.decrypt(
-    { name: "AES-GCM", iv },
-    masterKey,
-    encryptedPwd
-  )
-
-  console.log(bufferToString(decryptedPwd))
-  // subtle.verify("SHA-256", )
+  // let recoveredAESGCM = await subtle.importKey(
+  //   "raw",
+  //   recovered.AESGCMKey,
+  //   {name: "AES-GCM", hash: {name: "SHA-256"}},
+  //   false,
+  //   ["encrypt", "decrypt"]
+  // )
+  // console.log(recoveredAESGCM)
 }
 let password = "This is the password";
 test(password);

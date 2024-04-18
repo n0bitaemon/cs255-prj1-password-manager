@@ -4,7 +4,7 @@ const { randomBytes } = require("crypto");
 /********* External Imports ********/
 
 const { stringToBuffer, bufferToString, encodeBuffer, decodeBuffer, getRandomBytes } = require("./lib");
-const { encode } = require("punycode");
+const { encode, decode } = require("punycode");
 const { subtle } = require('crypto').webcrypto;
 
 /********* Constants ********/
@@ -136,7 +136,82 @@ class Keychain {
     * Return Type: Keychain
     */
   static async load(password, repr, trustedDataCheck) {
-    throw "Not Implemented!";
+    if(trustedDataCheck !== undefined){
+      let checksum = await subtle.digest("SHA-256", stringToBuffer(repr));
+      if(encodeBuffer(checksum) !== trustedDataCheck){
+        throw "Tampering is detected!";
+      }
+    }
+
+    let contents = JSON.parse(repr);
+
+    let masterSalt = decodeBuffer(contents["masterSalt"]);
+    let HMACSalt = decodeBuffer(contents["HMACSalt"]);
+    let HMACKey_sig = decodeBuffer(contents["HMACKey_sig"]);
+    let AESGCMSalt = decodeBuffer(contents["AESGCMSalt"]);
+    let AESGCMKey_sig = decodeBuffer(contents["AESGCMKey_sig"]);
+
+    // authentication
+    let rawKey = await subtle.importKey(
+      "raw",
+      stringToBuffer(password),
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"]
+    );
+    let masterKey = await subtle.deriveKey(
+      { name: "PBKDF2", salt: masterSalt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+      rawKey,
+      { name: "HMAC", hash: "SHA-256", length: 256 },
+      false,
+      ["sign", "verify"]
+    );
+
+    let HMACVerification = await subtle.verify(
+      "HMAC",
+      masterKey,
+      HMACKey_sig,
+      HMACSalt
+    )
+
+    let AESGCMVerification = await subtle.verify(
+      "HMAC",
+      masterKey,
+      AESGCMKey_sig,
+      AESGCMSalt
+    );
+
+    // For avoiding timing attack
+    if(AESGCMVerification !== true || HMACVerification !== true){
+      throw "Password is incorect!";
+    }
+
+    let HMACKey = await subtle.importKey(
+      "raw",
+      HMACKey_sig,
+      { name: "HMAC", hash: "SHA-256" },
+      true,
+      ["sign"]
+    );
+
+    let AESGCMKey = await subtle.importKey(
+      "raw",
+      AESGCMKey_sig,
+      {name: "AES-GCM", length: 256},
+      true,
+      ["encrypt", "decrypt"]
+    );
+    
+    let kvs = {}
+    for(const [key, value] of Object.entries(contents["kvs"])){
+      kvs[key] = {};
+      kvs[key]["iv"] = decodeBuffer(value["iv"]);
+      kvs[key]["pwd"] = decodeBuffer(value["pwd"]);
+      kvs[key]["tag"] = decodeBuffer(value["tag"]);
+    }
+    
+    return new Keychain(kvs, masterSalt, HMACSalt, HMACKey_sig, HMACKey, AESGCMSalt, AESGCMKey_sig, AESGCMKey);
+    // throw "Not Implemented!";
   };
 
   /**
@@ -156,20 +231,20 @@ class Keychain {
 
     let contents = this.secrets;
 
-    contents["masterSalt"] = encodeBuffer(bufferToString(contents["masterSalt"]));
+    contents["masterSalt"] = encodeBuffer(contents["masterSalt"]);
 
-    contents["HMACSalt"] = encodeBuffer(bufferToString(contents["HMACSalt"]));
+    contents["HMACSalt"] = encodeBuffer(contents["HMACSalt"]);
     contents["HMACKey_sig"] = encodeBuffer(contents["HMACKey_sig"]);
     contents["HMACKey"] = encodeBuffer(await subtle.exportKey("raw", contents["HMACKey"]));
 
-    contents["AESGCMSalt"] = encodeBuffer(bufferToString(contents["AESGCMSalt"]));
+    contents["AESGCMSalt"] = encodeBuffer(contents["AESGCMSalt"]);
     contents["AESGCMKey_sig"] = encodeBuffer(contents["AESGCMKey_sig"]);
     contents["AESGCMKey"] = encodeBuffer(await subtle.exportKey("raw", contents["AESGCMKey"]));
     
     for(const [key, value] of Object.entries(contents["kvs"])){
-      contents["kvs"][key]["iv"] = encodeBuffer(contents["kvs"][key]["iv"]);
-      contents["kvs"][key]["pwd"] = encodeBuffer(contents["kvs"][key]["pwd"]);
-      contents["kvs"][key]["tag"] = encodeBuffer(contents["kvs"][key]["tag"]);
+      contents["kvs"][key]["iv"] = encodeBuffer(value["iv"]);
+      contents["kvs"][key]["pwd"] = encodeBuffer(value["pwd"]);
+      contents["kvs"][key]["tag"] = encodeBuffer(value["tag"]);
     }
 
     let encodedStore = JSON.stringify(contents);
@@ -233,7 +308,6 @@ class Keychain {
     }
 
     return plaintext;
-
     // throw "Not Implemented!";
   };
 
@@ -314,29 +388,3 @@ class Keychain {
 };
 
 module.exports = { Keychain }
-
-// These code is for testing
-async function test(password) {
-  // initialize keychain
-  let keychain = await Keychain.init(password);
-  await keychain.set("www.google.com", "trietsuper");
-  await keychain.set("www.facebook.com", "trietdeptraiahaha");
-  await keychain.set("www.example.com", "talasieunhan");
-
-  console.log(keychain.secrets);
-
-  console.log(await keychain.get("www.example.com"));
-  console.log(await keychain.get("www.facebook.com"));
-
-  await keychain.remove("www.facebook.com");
-
-  console.log(await keychain.get("www.facebook.com"));
-  console.log(await keychain.get("www.google.com"))
-}
-let password = "This is the password";
-
-try{
-  test(password);
-} catch(e){
-  console.log(e);
-}

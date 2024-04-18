@@ -4,21 +4,32 @@ const { randomBytes } = require("crypto");
 /********* External Imports ********/
 
 const { stringToBuffer, bufferToString, encodeBuffer, decodeBuffer, getRandomBytes } = require("./lib");
-const { encode, decode } = require("punycode");
 const { subtle } = require('crypto').webcrypto;
 
 /********* Constants ********/
 
 const PBKDF2_ITERATIONS = 100000; // number of iterations for PBKDF2 algorithm
 const MAX_PASSWORD_LENGTH = 64;   // we can assume no password is longer than this many characters
+const PADDED_PASSWORD_LENGTH = 72;
 
-function toArrayBuffer(buffer) {
-  const arrayBuffer = new ArrayBuffer(buffer.length);
-  const view = new Uint8Array(arrayBuffer);
-  for (let i = 0; i < buffer.length; ++i) {
-    view[i] = buffer[i];
+function pad(pwd, len){
+  const paddingOne = Buffer.from([1]);
+  const paddingZero = Buffer.from([0]);
+
+  let paddedPwd = Buffer.concat([pwd, paddingOne]);
+  while(paddedPwd.length < len){
+    paddedPwd = Buffer.concat([paddedPwd, paddingZero]);
   }
-  return arrayBuffer;
+
+  return paddedPwd;
+}
+
+function unpad(paddedPwd){
+  let i = paddedPwd.length - 1;
+  while(paddedPwd[i] == 0 && i >= 0){
+    i--;
+  }
+  return paddedPwd.slice(0, i);
 }
 
 /********* Implementation ********/
@@ -304,7 +315,7 @@ class Keychain {
         encryptedPwd
       );
 
-      plaintext = bufferToString(plaintext);
+      plaintext = bufferToString(unpad(Buffer.from(plaintext)));
     }
 
     return plaintext;
@@ -344,7 +355,7 @@ class Keychain {
     let encryptedPwd = await subtle.encrypt(
       {name: "AES-GCM", iv: iv},
       this.secrets.AESGCMKey,
-      stringToBuffer(value)
+      pad(stringToBuffer(value), PADDED_PASSWORD_LENGTH)
     )
 
     let tag = await subtle.sign(
